@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import axios from 'axios';
+import axios from "axios";
 
 function App() {
   const [file, setFile] = useState(null);
@@ -11,8 +11,8 @@ function App() {
   const ws = useRef(null);
   const retryCount = useRef(0);
   const maxRetries = 5;
-  const retryDelay = 3000; 
-  const chunkSize = 64 * 1024; 
+  const retryDelay = 3000;
+  const chunkSize = 64 * 1024;
 
   useEffect(() => {
     return () => {
@@ -36,7 +36,7 @@ function App() {
   };
 
   const connectWebSocket = () => {
-    ws.current = new WebSocket("ws://localhost:3001/ws");
+    ws.current = new WebSocket("ws://192.168.0.112:3001/ws");
 
     ws.current.onopen = () => {
       console.log("WebSocket connection established");
@@ -91,12 +91,14 @@ function App() {
   };
 
   const startUpload = () => {
-    ws.current.send(JSON.stringify({
-      type: "start",
-      fileName: file.name,
-      fileSize: file.size,
-      fileId: fileId
-    }));
+    ws.current.send(
+      JSON.stringify({
+        type: "start",
+        fileName: file.name,
+        fileSize: file.size,
+        fileId: fileId,
+      })
+    );
   };
 
   const resumeUpload = (bytesReceived) => {
@@ -105,12 +107,14 @@ function App() {
 
     reader.onload = (e) => {
       const chunk = e.target.result;
-      ws.current.send(JSON.stringify({
-        type: "chunk",
-        data: chunk,
-        fileSize: file.size,
-        fileId: fileId
-      }));
+      ws.current.send(
+        JSON.stringify({
+          type: "chunk",
+          data: chunk,
+          fileSize: file.size,
+          fileId: fileId,
+        })
+      );
 
       offset += chunkSize;
       if (offset < file.size) {
@@ -136,7 +140,9 @@ function App() {
 
     try {
       // Check if there's an existing upload
-      const response = await axios.get(`http://localhost:3001/upload-status/${fileId}`);
+      const response = await axios.get(
+        `http://192.168.0.112:3001/upload-status/${fileId}`
+      );
       if (response.data.bytesReceived) {
         setProgress((response.data.bytesReceived / file.size) * 100);
       }
@@ -155,7 +161,7 @@ function App() {
       </button>
       <div>Progress: {progress.toFixed(2)}%</div>
       <div>Speed: {speed.toFixed(2)} MB/s</div>
-      {error && <div style={{color: 'red'}}>{error}</div>}
+      {error && <div style={{ color: "red" }}>{error}</div>}
     </div>
   );
 }
