@@ -1,98 +1,161 @@
 import React, { useState, useEffect, useRef } from "react";
-import axios from "axios";
-import { io } from "socket.io-client";
-
-const CHUNK_SIZE = 1024 * 1024; // 1MB chunks
+import axios from 'axios';
 
 function App() {
   const [file, setFile] = useState(null);
   const [progress, setProgress] = useState(0);
   const [speed, setSpeed] = useState(0);
-  const socket = useRef(null);
-  const uploadStartTime = useRef(null);
-  const lastUpdateTime = useRef(null);
-  const lastUploadedBytes = useRef(0);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState(null);
+  const [fileId, setFileId] = useState(null);
+  const ws = useRef(null);
+  const retryCount = useRef(0);
+  const maxRetries = 5;
+  const retryDelay = 3000; 
+  const chunkSize = 64 * 1024; 
 
   useEffect(() => {
-    socket.current = io("http://localhost:3001", {
-      withCredentials: true,
-      transports: ['websocket']
-    });
-
-    socket.current.on("connect", () => {
-      console.log("Connected to server");
-    });
-
-    socket.current.on("upload-progress", (data) => {
-      console.log("Received upload progress:", data);
-      setProgress(data.progress);
-      
-      // Calculate speed
-      const currentTime = Date.now();
-      const elapsedSinceLastUpdate = (currentTime - lastUpdateTime.current) / 1000; // in seconds
-      const bytesUploaded = (data.progress / 100) * file.size;
-      const bytesSinceLastUpdate = bytesUploaded - lastUploadedBytes.current;
-      
-      const speedMBps = ((bytesSinceLastUpdate / elapsedSinceLastUpdate) / (1024 * 1024)).toFixed(2);
-      setSpeed(speedMBps);
-
-      // Update references for next calculation
-      lastUpdateTime.current = currentTime;
-      lastUploadedBytes.current = bytesUploaded;
-    });
-
     return () => {
-      if (socket.current) {
-        socket.current.disconnect();
+      if (ws.current) {
+        ws.current.close();
       }
     };
-  }, [file]);
+  }, []);
 
   const handleFileChange = (e) => {
-    setFile(e.target.files[0]);
+    const selectedFile = e.target.files[0];
+    setFile(selectedFile);
     setProgress(0);
     setSpeed(0);
-    lastUploadedBytes.current = 0;
-    lastUpdateTime.current = null;
+    setError(null);
+    setFileId(generateFileId(selectedFile));
   };
 
-  const uploadChunk = async (chunk, chunkIndex, totalChunks, totalSize) => {
-    const formData = new FormData();
-    formData.append("chunk", chunk);
-    formData.append("filename", file.name);
-    formData.append("chunkIndex", chunkIndex.toString());
-    formData.append("totalChunks", totalChunks.toString());
-    formData.append("totalSize", totalSize.toString());
-
-    await axios.post("http://localhost:3001/api/upload-chunk", formData);
+  const generateFileId = (file) => {
+    return `${file.name}-${file.size}-${new Date().getTime()}`;
   };
 
-  const handleUpload = async () => {
+  const connectWebSocket = () => {
+    ws.current = new WebSocket("ws://localhost:3001/ws");
+
+    ws.current.onopen = () => {
+      console.log("WebSocket connection established");
+      retryCount.current = 0;
+      startUpload();
+    };
+
+    ws.current.onmessage = handleWebSocketMessage;
+
+    ws.current.onerror = (error) => {
+      console.error("WebSocket error:", error);
+      setError("Connection error. Retrying...");
+      retryConnection();
+    };
+
+    ws.current.onclose = () => {
+      console.log("WebSocket connection closed");
+      if (uploading) {
+        setError("Connection closed. Retrying...");
+        retryConnection();
+      }
+    };
+  };
+
+  const retryConnection = () => {
+    if (retryCount.current < maxRetries) {
+      retryCount.current += 1;
+      setTimeout(connectWebSocket, retryDelay);
+    } else {
+      setError("Max retries reached. Please try again later.");
+      setUploading(false);
+    }
+  };
+
+  const handleWebSocketMessage = (event) => {
+    const message = JSON.parse(event.data);
+    if (message.type === "progress") {
+      setProgress(message.progress);
+      setSpeed(message.speed);
+    } else if (message.type === "complete") {
+      console.log(message.message);
+      setUploading(false);
+      setProgress(100);
+      ws.current.close();
+    } else if (message.type === "error") {
+      setError(message.message);
+      setUploading(false);
+      ws.current.close();
+    } else if (message.type === "resume") {
+      resumeUpload(message.bytesReceived);
+    }
+  };
+
+  const startUpload = () => {
+    ws.current.send(JSON.stringify({
+      type: "start",
+      fileName: file.name,
+      fileSize: file.size,
+      fileId: fileId
+    }));
+  };
+
+  const resumeUpload = (bytesReceived) => {
+    const reader = new FileReader();
+    let offset = bytesReceived;
+
+    reader.onload = (e) => {
+      const chunk = e.target.result;
+      ws.current.send(JSON.stringify({
+        type: "chunk",
+        data: chunk,
+        fileSize: file.size,
+        fileId: fileId
+      }));
+
+      offset += chunkSize;
+      if (offset < file.size) {
+        readNextChunk(offset);
+      } else {
+        ws.current.send(JSON.stringify({ type: "end", fileId: fileId }));
+      }
+    };
+
+    const readNextChunk = (chunkOffset) => {
+      const slice = file.slice(chunkOffset, chunkOffset + chunkSize);
+      reader.readAsDataURL(slice);
+    };
+
+    readNextChunk(offset);
+  };
+
+  const uploadFile = async () => {
     if (!file) return;
 
-    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-    const totalSize = file.size;
-    uploadStartTime.current = Date.now();
-    lastUpdateTime.current = Date.now();
-    lastUploadedBytes.current = 0;
+    setUploading(true);
+    setError(null);
 
-    for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-      const chunk = file.slice(
-        chunkIndex * CHUNK_SIZE,
-        (chunkIndex + 1) * CHUNK_SIZE
-      );
-      await uploadChunk(new Blob([chunk]), chunkIndex, totalChunks, totalSize);
+    try {
+      // Check if there's an existing upload
+      const response = await axios.get(`http://localhost:3001/upload-status/${fileId}`);
+      if (response.data.bytesReceived) {
+        setProgress((response.data.bytesReceived / file.size) * 100);
+      }
+    } catch (error) {
+      console.error("Error checking upload status:", error);
     }
 
-    console.log("Upload completed");
+    connectWebSocket();
   };
 
   return (
     <div>
-      <input type="file" onChange={handleFileChange} />
-      <button onClick={handleUpload}>Upload</button>
+      <input type="file" onChange={handleFileChange} disabled={uploading} />
+      <button onClick={uploadFile} disabled={!file || uploading}>
+        {uploading ? "Uploading..." : "Upload"}
+      </button>
       <div>Progress: {progress.toFixed(2)}%</div>
-      <div>Speed: {speed} MB/s</div>
+      <div>Speed: {speed.toFixed(2)} MB/s</div>
+      {error && <div style={{color: 'red'}}>{error}</div>}
     </div>
   );
 }
