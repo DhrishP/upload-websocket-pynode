@@ -102,16 +102,11 @@ function App() {
   const resumeUpload = (bytesReceived) => {
     const reader = new FileReader();
     let offset = bytesReceived;
-
+  
     reader.onload = (e) => {
       const chunk = e.target.result;
-      ws.current.send(JSON.stringify({
-        type: "chunk",
-        data: chunk,
-        fileSize: file.size,
-        fileId: fileId
-      }));
-
+      ws.current.send(chunk);
+  
       offset += chunkSize;
       if (offset < file.size) {
         readNextChunk(offset);
@@ -119,15 +114,14 @@ function App() {
         ws.current.send(JSON.stringify({ type: "end", fileId: fileId }));
       }
     };
-
+  
     const readNextChunk = (chunkOffset) => {
       const slice = file.slice(chunkOffset, chunkOffset + chunkSize);
-      reader.readAsDataURL(slice);
+      reader.readAsArrayBuffer(slice);  // Read as ArrayBuffer for binary data
     };
-
+  
     readNextChunk(offset);
   };
-
   const uploadFile = async () => {
     if (!file) return;
 

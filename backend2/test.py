@@ -1,8 +1,6 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-import asyncio
 import os
-import base64
 import json
 import time
 import tempfile
@@ -17,68 +15,75 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 upload_progress = {}
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 
+if not os.path.exists(UPLOAD_DIR):
+    os.makedirs(UPLOAD_DIR)
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    
+
     file_path = ""
     temp_file_path = ""
     start_time = time.time()
     total_bytes = 0
     file_id = None
+    file = None
 
     try:
         while True:
-            data = await websocket.receive_text()
-            message = json.loads(data)
-
-            if message["type"] == "start":
-                file_name = message["fileName"]
-                file_id = message["fileId"]
-                file_path = os.path.join("uploads", file_name)
-                temp_file_path = os.path.join(tempfile.gettempdir(), f"{file_id}.part")
+            # This part is modified to handle both text and binary data
+            data = await websocket.receive()
+            
+            if "text" in data:
+                message = json.loads(data["text"])
                 
-                if os.path.exists(temp_file_path):
-                    total_bytes = os.path.getsize(temp_file_path)
-                else:
-                    total_bytes = 0
-                
-                start_time = time.time()
-                
-             
-                file = open(temp_file_path, "ab")
-             
-                await websocket.send_json({
-                    "type": "resume",
-                    "bytesReceived": total_bytes
-                })
+                if message["type"] == "start":
+                    file_name = message["fileName"]
+                    file_id = message["fileId"]
+                    file_path = os.path.join(UPLOAD_DIR, file_name)
+                    temp_file_path = os.path.join(tempfile.gettempdir(), f"{file_id}.part")
 
-            elif message["type"] == "chunk":
-                chunk = base64.b64decode(message["data"].split(",")[1])
-                file.write(chunk)
-                total_bytes += len(chunk)
-                
-                elapsed_time = time.time() - start_time
-                speed = total_bytes / elapsed_time if elapsed_time > 0 else 0
-                progress = (total_bytes / message["fileSize"]) * 100
+                    if os.path.exists(temp_file_path):
+                        total_bytes = os.path.getsize(temp_file_path)
+                    else:
+                        total_bytes = 0
 
-                upload_progress[file_id] = {
-                    "bytesReceived": total_bytes,
-                    "progress": progress,
-                    "speed": speed / (1024 * 1024)  # Convert to MB/s
-                }
+                    start_time = time.time()
 
-                await websocket.send_json({
-                    "type": "progress",
-                    "progress": progress,
-                    "speed": speed / (1024 * 1024)  # Convert to MB/s
-                })
+                    file = open(temp_file_path, "ab")
+
+                    await websocket.send_json({
+                        "type": "resume",
+                        "bytesReceived": total_bytes
+                    })
+
+            elif "bytes" in data: 
+                if file:
+                    file.write(data["bytes"])
+                    total_bytes += len(data["bytes"])
+
+                    elapsed_time = time.time() - start_time
+                    speed = total_bytes / elapsed_time if elapsed_time > 0 else 0
+                    progress = (total_bytes / message["fileSize"]) * 100
+
+                    upload_progress[file_id] = {
+                        "bytesReceived": total_bytes,
+                        "progress": progress,
+                        "speed": speed / (1024 * 1024)  # Convert to MB/s
+                    }
+
+                    await websocket.send_json({
+                        "type": "progress",
+                        "progress": progress,
+                        "speed": speed / (1024 * 1024)  # Convert to MB/s
+                    })
 
             elif message["type"] == "end":
-                file.close()
+                if file:
+                    file.close()
                 os.rename(temp_file_path, file_path)
                 if file_id in upload_progress:
                     del upload_progress[file_id]
@@ -90,7 +95,7 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         await websocket.send_json({"type": "error", "message": str(e)})
     finally:
-        if 'file' in locals() and not file.closed:
+        if file and not file.closed:
             file.close()
         await websocket.close()
 
