@@ -1,18 +1,20 @@
 import React, { useState, useEffect, useRef } from "react";
-import axios from 'axios';
+import axios from "axios";
 
 function App() {
   const [file, setFile] = useState(null);
   const [progress, setProgress] = useState(0);
   const [speed, setSpeed] = useState(0);
+  const [eta, setEta] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState(null);
   const [fileId, setFileId] = useState(null);
   const ws = useRef(null);
   const retryCount = useRef(0);
   const maxRetries = 5;
-  const retryDelay = 3000; 
-  const chunkSize = 64 * 1024; 
+  const retryDelay = 3000;
+  const chunkSize = 64 * 1024;
+  const fileRef = useRef(null);
 
   useEffect(() => {
     return () => {
@@ -25,8 +27,10 @@ function App() {
   const handleFileChange = (e) => {
     const selectedFile = e.target.files[0];
     setFile(selectedFile);
+    fileRef.current = selectedFile;
     setProgress(0);
     setSpeed(0);
+    setEta(null);
     setError(null);
     setFileId(generateFileId(selectedFile));
   };
@@ -76,10 +80,12 @@ function App() {
     if (message.type === "progress") {
       setProgress(message.progress);
       setSpeed(message.speed);
+      setEta(message.eta);
     } else if (message.type === "complete") {
       console.log(message.message);
       setUploading(false);
       setProgress(100);
+      setEta(0);
       ws.current.close();
     } else if (message.type === "error") {
       setError(message.message);
@@ -91,37 +97,45 @@ function App() {
   };
 
   const startUpload = () => {
-    ws.current.send(JSON.stringify({
-      type: "start",
-      fileName: file.name,
-      fileSize: file.size,
-      fileId: fileId
-    }));
+    ws.current.send(
+      JSON.stringify({
+        type: "start",
+        fileName: file.name,
+        fileSize: file.size,
+        fileId: fileId,
+      })
+    );
   };
 
   const resumeUpload = (bytesReceived) => {
-    const reader = new FileReader();
     let offset = bytesReceived;
-  
-    reader.onload = (e) => {
-      const chunk = e.target.result;
-      ws.current.send(chunk);
-  
-      offset += chunkSize;
-      if (offset < file.size) {
-        readNextChunk(offset);
-      } else {
-        ws.current.send(JSON.stringify({ type: "end", fileId: fileId }));
-      }
-    };
-  
+
     const readNextChunk = (chunkOffset) => {
-      const slice = file.slice(chunkOffset, chunkOffset + chunkSize);
-      reader.readAsArrayBuffer(slice);  // Read as ArrayBuffer for binary data
+      const slice = fileRef.current.slice(
+        chunkOffset,
+        chunkOffset + parseInt(chunkSize)
+      );
+      const reader = new FileReader();
+
+      reader.onload = (e) => {
+        const chunk = e.target.result;
+        ws.current.send(chunk);
+
+        offset += chunk.byteLength;
+        if (offset < fileRef.current.size) {
+          readNextChunk(offset);
+        } else {
+          console.log("Sending end signal");
+          ws.current.send(JSON.stringify({ type: "end", fileId: fileId }));
+        }
+      };
+
+      reader.readAsArrayBuffer(slice);
     };
-  
+
     readNextChunk(offset);
   };
+
   const uploadFile = async () => {
     if (!file) return;
 
@@ -129,8 +143,9 @@ function App() {
     setError(null);
 
     try {
-      // Check if there's an existing upload
-      const response = await axios.get(`http://localhost:3001/upload-status/${fileId}`);
+      const response = await axios.get(
+        `http://localhost:3001/upload-status/${fileId}`
+      );
       if (response.data.bytesReceived) {
         setProgress((response.data.bytesReceived / file.size) * 100);
       }
@@ -141,6 +156,22 @@ function App() {
     connectWebSocket();
   };
 
+  const formatEta = (seconds) => {
+    if (seconds === Infinity || isNaN(seconds)) return "Calculating...";
+    if (seconds === 0) return "Complete";
+    
+    if (seconds < 60) return "< 1 minute";
+    
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+
+    let result = "";
+    if (hours > 0) result += `${hours}h `;
+    if (minutes > 0 || hours > 0) result += `${minutes}m`;
+
+    return result.trim();
+  };
+
   return (
     <div>
       <input type="file" onChange={handleFileChange} disabled={uploading} />
@@ -149,7 +180,8 @@ function App() {
       </button>
       <div>Progress: {progress.toFixed(2)}%</div>
       <div>Speed: {speed.toFixed(2)} MB/s</div>
-      {error && <div style={{color: 'red'}}>{error}</div>}
+      <div>ETA: {eta !== null ? formatEta(eta) : "N/A"}</div>
+      {error && <div style={{ color: "red" }}>{error}</div>}
     </div>
   );
 }
